@@ -32,7 +32,8 @@ static void sm100_fp8_fp4_mega_moe(
     const int& num_tokens, const int& num_topk,
     const int& hidden, const int& intermediate_hidden,
     const float& activation_clamp,
-    const bool& fast_math
+    const bool& fast_math,
+    const int& shared_weight_gran_k
 ) {
     const auto num_ranks = static_cast<int>(sym_buffer_ptrs.size());
     const auto num_experts = num_experts_per_rank * num_ranks;
@@ -50,6 +51,8 @@ static void sm100_fp8_fp4_mega_moe(
     // Make tensormap
     constexpr int kGranK = 32;
     const int sf_smem_outer_dim = config.block_k / (kGranK * 4);
+    const int shared_weight_sf_smem_outer_dim =
+        ceil_div(config.block_k, shared_weight_gran_k * 4);
     const auto tensor_map_l1_acts = make_tma_2d_desc(l1_acts,
                                                      hidden, config.num_ring_tokens,
                                                      config.block_k, config.load_block_m,
@@ -108,9 +111,9 @@ static void sm100_fp8_fp4_mega_moe(
     const auto tensor_map_shared_l1_weights_sf = num_shared_experts > 0 ? make_tma_sf_desc(
         cute::UMMA::Major::MN, shared_l1_weights_sf,
         shared_intermediate_hidden * 2, hidden,
-        config.block_n, kGranK,
+        config.block_n, shared_weight_gran_k,
         1, 0, 0, false,
-        sf_smem_outer_dim, static_cast<int>(shared_l1_weights_sf.stride(-1))) : tensor_map_l1_weights_sf;
+        shared_weight_sf_smem_outer_dim, static_cast<int>(shared_l1_weights_sf.stride(-1))) : tensor_map_l1_weights_sf;
     const auto tensor_map_shared_l1_output = num_shared_experts > 0 ? make_tma_2d_desc(
         shared_l2_acts,
         shared_intermediate_hidden, num_max_tokens_per_rank,
@@ -134,9 +137,9 @@ static void sm100_fp8_fp4_mega_moe(
     const auto tensor_map_shared_l2_weights_sf = num_shared_experts > 0 ? make_tma_sf_desc(
         cute::UMMA::Major::MN, shared_l2_weights_sf,
         hidden, shared_intermediate_hidden,
-        config.block_n, kGranK,
+        config.block_n, shared_weight_gran_k,
         1, 0, 0, false,
-        sf_smem_outer_dim, static_cast<int>(shared_l2_weights_sf.stride(-1))) : tensor_map_l2_weights_sf;
+        shared_weight_sf_smem_outer_dim, static_cast<int>(shared_l2_weights_sf.stride(-1))) : tensor_map_l2_weights_sf;
 
     // Stats can be optional
     int* cumulative_local_expert_recv_stats_ptr = nullptr;
@@ -168,6 +171,7 @@ static void __instantiate_kernel() {{
         {}, {},
         {},
         {},
+        {},
         {}
     >);
 }};
@@ -184,9 +188,10 @@ static void __instantiate_kernel() {{
         config.num_bytes_per_pull,
         config.num_dispatch_threads, config.num_non_epilogue_threads, config.num_epilogue_threads,
         num_sms, num_ranks,
-        to_string(activation_clamp),
+        activation_clamp != std::numeric_limits<float>::infinity() ? "true" : "false",
         fast_math ? "true" : "false",
-        to_string(l1_weights.scalar_type())));
+        to_string(l1_weights.scalar_type()),
+        shared_weight_gran_k));
 
     // Launch
     jit->launch(
@@ -199,6 +204,7 @@ static void __instantiate_kernel() {{
         y.data_ptr(),
         cumulative_local_expert_recv_stats_ptr,
         num_tokens,
+        activation_clamp,
         layout::SymBuffer<>(sym_buffer_ptrs, rank_idx),
         tensor_map_l1_acts,
         tensor_map_l1_acts_sf,

@@ -166,7 +166,8 @@ static void fp8_fp4_mega_moe(
     const std::tuple<int, int, int>& recipe,
     const std::string& activation,
     const std::optional<float>& activation_clamp_opt,
-    const bool& fast_math
+    const bool& fast_math,
+    const std::optional<std::tuple<int, int, int>>& shared_recipe_opt
 ) {
     const auto [l1_weights, l1_weights_sf] = l1_weights_tuple;
     const auto [l2_weights, l2_weights_sf] = l2_weights_tuple;
@@ -175,6 +176,9 @@ static void fp8_fp4_mega_moe(
     const auto num_tokens = static_cast<int>(y.size(0));
     const auto [rm, rn, rk] = recipe;
     DG_HOST_ASSERT(rm == 1 and rn == 1 and rk == 32);
+    const auto [shared_rm, shared_rn, shared_rk] = shared_recipe_opt.value_or(recipe);
+    DG_HOST_ASSERT((shared_rm == 1 and shared_rn == 1 and shared_rk == 32) or
+                   (shared_rm == 1 and shared_rn == 128 and shared_rk == 128));
     DG_HOST_ASSERT(activation == "swiglu");
     DG_HOST_ASSERT(shared_l1_weights_tuple_opt.has_value() == shared_l2_weights_tuple_opt.has_value());
 
@@ -221,9 +225,9 @@ static void fp8_fp4_mega_moe(
         DG_HOST_ASSERT(shared_l2_n == hidden);
         DG_HOST_ASSERT(shared_l1_weights.scalar_type() == torch::kFloat8_e4m3fn);
         DG_HOST_ASSERT(shared_l2_weights.scalar_type() == torch::kFloat8_e4m3fn);
-        check_sf_layout(shared_l1_weights_sf, shared_intermediate_hidden * 2, hidden, kGranMN, kGranK,
+        check_sf_layout(shared_l1_weights_sf, shared_intermediate_hidden * 2, hidden, kGranMN, shared_rk,
                         std::nullopt, true, false, torch::kInt);
-        check_sf_layout(shared_l2_weights_sf, hidden, shared_intermediate_hidden, kGranMN, kGranK,
+        check_sf_layout(shared_l2_weights_sf, hidden, shared_intermediate_hidden, kGranMN, shared_rk,
                         std::nullopt, true, false, torch::kInt);
     }
 
@@ -271,7 +275,8 @@ static void fp8_fp4_mega_moe(
                                num_shared_experts,
                                num_tokens, num_topk,
                                hidden, intermediate_hidden,
-                               activation_clamp, fast_math);
+                               activation_clamp, fast_math,
+                               shared_rk);
     } else {
         DG_HOST_UNREACHABLE("Unsupported architecture");
     }
